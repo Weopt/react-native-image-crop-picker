@@ -8,6 +8,8 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Build;
@@ -16,6 +18,7 @@ import android.provider.MediaStore;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.content.FileProvider;
 import android.util.Base64;
+import android.util.Log;
 import android.webkit.MimeTypeMap;
 import android.content.ContentResolver;
 
@@ -38,8 +41,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -76,7 +81,6 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
     private boolean hideBottomControls = false;
     private boolean enableRotationGesture = false;
     private boolean disableCropperColorSetters = false;
-    private boolean useFrontCamera = false;
     private ReadableMap options;
 
     //Grey 800
@@ -116,24 +120,23 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
     }
 
     private void setConfiguration(final ReadableMap options) {
-        mediaType = options.hasKey("mediaType") ? options.getString("mediaType") : "any";
-        multiple = options.hasKey("multiple") ? options.getBoolean("multiple") : false;
-        includeBase64 = options.hasKey("includeBase64") ? options.getBoolean("includeBase64") : false;
-        includeExif = options.hasKey("includeExif") ? options.getBoolean("includeExif") : false;
-        width = options.hasKey("width") ? options.getInt("width") : 200;
-        height = options.hasKey("height") ? options.getInt("height") : 200;
-        cropping = options.hasKey("cropping") ? options.getBoolean("cropping") : false;
-        cropperActiveWidgetColor = options.hasKey("cropperActiveWidgetColor") ? options.getString("cropperActiveWidgetColor") : DEFAULT_TINT;
-        cropperStatusBarColor = options.hasKey("cropperStatusBarColor") ? options.getString("cropperStatusBarColor") : DEFAULT_TINT;
-        cropperToolbarColor = options.hasKey("cropperToolbarColor") ? options.getString("cropperToolbarColor") : DEFAULT_TINT;
+        mediaType = options.hasKey("mediaType") ? options.getString("mediaType") : mediaType;
+        multiple = options.hasKey("multiple") && options.getBoolean("multiple");
+        includeBase64 = options.hasKey("includeBase64") && options.getBoolean("includeBase64");
+        includeExif = options.hasKey("includeExif") && options.getBoolean("includeExif");
+        width = options.hasKey("width") ? options.getInt("width") : width;
+        height = options.hasKey("height") ? options.getInt("height") : height;
+        cropping = options.hasKey("cropping") ? options.getBoolean("cropping") : cropping;
+        cropperActiveWidgetColor = options.hasKey("cropperActiveWidgetColor") ? options.getString("cropperActiveWidgetColor") : cropperActiveWidgetColor;
+        cropperStatusBarColor = options.hasKey("cropperStatusBarColor") ? options.getString("cropperStatusBarColor") : cropperStatusBarColor;
+        cropperToolbarColor = options.hasKey("cropperToolbarColor") ? options.getString("cropperToolbarColor") : cropperToolbarColor;
         cropperToolbarTitle = options.hasKey("cropperToolbarTitle") ? options.getString("cropperToolbarTitle") : null;
-        cropperCircleOverlay = options.hasKey("cropperCircleOverlay") ? options.getBoolean("cropperCircleOverlay") : false;
-        freeStyleCropEnabled = options.hasKey("freeStyleCropEnabled") ? options.getBoolean("freeStyleCropEnabled") : false;
-        showCropGuidelines = options.hasKey("showCropGuidelines") ? options.getBoolean("showCropGuidelines") : true;
-        hideBottomControls = options.hasKey("hideBottomControls") ? options.getBoolean("hideBottomControls") : false;
-        enableRotationGesture = options.hasKey("enableRotationGesture") ? options.getBoolean("enableRotationGesture") : false;
-        disableCropperColorSetters = options.hasKey("disableCropperColorSetters") ? options.getBoolean("disableCropperColorSetters") : false;
-        useFrontCamera = options.hasKey("useFrontCamera") ? options.getBoolean("useFrontCamera") : false;
+        cropperCircleOverlay = options.hasKey("cropperCircleOverlay") ? options.getBoolean("cropperCircleOverlay") : cropperCircleOverlay;
+        freeStyleCropEnabled = options.hasKey("freeStyleCropEnabled") ? options.getBoolean("freeStyleCropEnabled") : freeStyleCropEnabled;
+        showCropGuidelines = options.hasKey("showCropGuidelines") ? options.getBoolean("showCropGuidelines") : showCropGuidelines;
+        hideBottomControls = options.hasKey("hideBottomControls") ? options.getBoolean("hideBottomControls") : hideBottomControls;
+        enableRotationGesture = options.hasKey("enableRotationGesture") ? options.getBoolean("enableRotationGesture") : enableRotationGesture;
+        disableCropperColorSetters = options.hasKey("disableCropperColorSetters") ? options.getBoolean("disableCropperColorSetters") : disableCropperColorSetters;
         this.options = options;
     }
 
@@ -306,12 +309,6 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
             }
 
             cameraIntent.putExtra(MediaStore.EXTRA_OUTPUT, mCameraCaptureURI);
-
-            if (this.useFrontCamera) {
-                cameraIntent.putExtra("android.intent.extras.CAMERA_FACING", 1);
-                cameraIntent.putExtra("android.intent.extras.LENS_FACING_FRONT", 1);
-                cameraIntent.putExtra("android.intent.extra.USE_FRONT_CAMERA", true);
-            }
 
             if (cameraIntent.resolveActivity(activity.getPackageManager()) == null) {
                 resultCollector.notifyProblem(E_CANNOT_LAUNCH_CAMERA, "Cannot launch camera");
@@ -526,17 +523,59 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
 
     private BitmapFactory.Options validateImage(String path) throws Exception {
         BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inJustDecodeBounds = true;
+        // options.inJustDecodeBounds = true;
         options.inPreferredConfig = Bitmap.Config.RGB_565;
         options.inDither = true;
 
-        BitmapFactory.decodeFile(path, options);
+        Bitmap imageBit = BitmapFactory.decodeFile(path, options);
+        imageBit = rotateImageIfRequired(imageBit, path);
+        OutputStream os;
+        try {
+            os = new FileOutputStream(path);
+            imageBit.compress(Bitmap.CompressFormat.JPEG, 100, os);
+            os.flush();
+            os.close();
+        } catch (Exception e) {
+            Log.e(getClass().getSimpleName(), "Error writing bitmap", e);
+        }
 
         if (options.outMimeType == null || options.outWidth == 0 || options.outHeight == 0) {
             throw new Exception("Invalid image selected");
         }
 
         return options;
+    }
+
+    /**
+     * Rotate an image if required.
+     *
+     * @param img           The image bitmap
+     * @param selectedImage Image URI
+     * @return The resulted Bitmap after manipulation
+     */
+    private static Bitmap rotateImageIfRequired(Bitmap img, String selectedImage) throws IOException {
+
+        ExifInterface ei = new ExifInterface(selectedImage);
+        int orientation = ei.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+        
+        switch (orientation) {
+            case ExifInterface.ORIENTATION_ROTATE_90:
+                return rotateImage(img, 90);
+            case ExifInterface.ORIENTATION_ROTATE_180:
+                return rotateImage(img, 180);
+            case ExifInterface.ORIENTATION_ROTATE_270:
+                return rotateImage(img, 270);
+            default:
+                return img;
+        }
+    }
+
+    private static Bitmap rotateImage(Bitmap img, int degree) {
+        Matrix matrix = new Matrix();
+        matrix.postRotate(degree);
+        Bitmap rotatedImg = Bitmap.createBitmap(img, 0, 0, img.getWidth(), img.getHeight(), matrix, true);
+        img.recycle();
+        return rotatedImg;
     }
 
     private WritableMap getImage(final Activity activity, String path) throws Exception {
